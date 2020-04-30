@@ -1,5 +1,11 @@
 # smartarray-scripts
-SmartArray RAID controller scripts for monitoring and diagnostics
+SmartArray RAID controller scripts for monitoring and diagnostics.
+
+The cciss* family of scripts should work on any controller driven by
+the cciss or hpsa driver as long as the appropriate utility is present.
+
+The hpsa* family of scripts work only on controllers driven by the
+hpsa driver.
 
 ## hpsa-smartctl
 
