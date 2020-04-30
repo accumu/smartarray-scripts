@@ -1,0 +1,77 @@
+#!/usr/bin/perl
+# vim:sw=4:ts=4:sts=4:et
+#
+# Script to easily change surfacescanmode on all HP SmartArray controllers
+# in a machine.
+#
+# Written by Niklas Edmundsson in December 2016
+
+# Copyright (C) 2016-2020 Niklas Edmundsson <nikke@acc.umu.se>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+use warnings;
+use strict;
+
+sub runcmd($)
+{
+    my $cmd=shift;
+
+    print "Running: $cmd\n" if($ENV{DEBUG});
+
+    my @ret = `$cmd`;
+
+    chomp(@ret);
+    return @ret;
+}
+
+my $usage = "Usage: $0 [high|idle|disable]\n";
+
+my $mode = shift || die $usage;
+
+my %slots;
+my $sacli;
+
+# Find controllers slots
+# hpssacli support Px1x onwards, hpacucli supports stuff until Px2x.
+foreach my $util (qw{ssacli hpssacli hpacucli}) {
+	foreach(runcmd("$util ctrl all show 2>/dev/null")) {
+	    if(/Slot\s+(\d+[a-z]*)/) {
+		$slots{$1} = 1;
+	    }
+	}
+	if(%slots) {
+		$sacli = $util;
+		last;
+	}
+}
+
+# Iterate over all controllers
+foreach my $slot(sort keys %slots) {
+    my $basecmd = "$sacli ctrl slot=$slot";
+    if($mode eq "high" || $mode eq "disable") {
+        runcmd("$basecmd modify surfacescanmode=$mode");
+    }
+    elsif($mode eq "idle") {
+        runcmd("$basecmd modify surfacescanmode=idle");
+        runcmd("$basecmd modify surfacescandelay=1");
+    }
+    else {
+        die $usage;
+    }
+}
+
+# Always silently exits, allows it to run on machines without
+# SmartArray controllers without noise.
+exit 0;
