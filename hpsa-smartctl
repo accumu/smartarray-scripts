@@ -1,0 +1,87 @@
+#!/usr/bin/perl
+#
+# Helper-script to issue smartctl commands to all disks connected
+# to HP/HPE Smart Array controllers using the hpsa driver (ie. Px1x and newer)
+#
+# Written by Niklas Edmundsson in January 2017
+
+# Copyright (C) 2017-2020 Niklas Edmundsson <nikke@acc.umu.se>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+use warnings;
+use strict;
+
+sub debug
+{
+	my(@a) = @_;
+
+	if($ENV{DEBUG}) {
+		print STDERR @a,"\n";
+	}
+
+}
+
+my @sgdevs;
+
+die "Usage: $0 smartctl-flags" unless($ARGV[0]);
+
+my $args = "";
+foreach my $arg (@ARGV) {
+    $args.=" " if($args);
+    $args .= $arg;
+}
+
+# Find sg devices used by Smart Array controllers
+foreach(`lsscsi -g`) {
+	chomp;
+	my ($scsi, $type, $vendor, $model, $rev, $dev, $sg) = split(/\s+/);
+
+	next unless($type eq 'storage');
+
+	push @sgdevs, $sg;
+}
+
+my $rc = 0;
+
+# Emit commands to all controllers
+foreach my $sg (@sgdevs) {
+	# Drives are listed first with no gaps. Find the highest one by
+	# doing inquiry
+	my $lastdrive=-1;
+
+	foreach my $unit (0 .. 63) {
+		my $cmd = "smartctl -i -q silent -d cciss,$unit $sg";
+		debug("cmd: ", $cmd);
+		system($cmd);
+		my $ret = $? >> 8;
+		debug("ret: $ret");
+		last if($ret != 0);
+		$lastdrive=$unit;
+	}
+	next if($lastdrive < 0);
+	debug("lastdrive: $lastdrive");
+	foreach my $unit (0 .. $lastdrive) {
+		my $cmd = "smartctl $args -d cciss,$unit $sg";
+		debug("cmd: ", $cmd);
+		print `$cmd`;
+		my $ret = $? >> 8;
+		debug("ret: $ret");
+		# smartctl return code is a bitmask, set all bits found
+		$rc |= $ret;
+	}
+}
+
+exit $rc;
