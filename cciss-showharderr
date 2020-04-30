@@ -1,0 +1,149 @@
+#!/usr/bin/perl
+# vim:sw=4:sts=4
+#
+# Shows hard errors on HDDs connected to HPE/HP/Compaq SmartArray/CCISS
+# controllers.
+#
+# Written by Niklas Edmundsson in May 2014
+
+# Copyright (C) 2014-2020 Niklas Edmundsson <nikke@acc.umu.se>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+
+use warnings;
+no warnings 'portable';  # Support for 64-bit ints required
+use strict;
+
+use File::Temp qw/ :mktemp /;
+
+my @utils=qw{ssacli hpssacli hpacucli};
+
+my $sacli;
+
+# Extracts an ADU report for a controller and prints HDDs with hard errors.
+sub show_hdd_harderr($) {
+    my $ctrl = shift;
+
+    my $currhdd="";
+    my $currctrl="";
+    my %h;
+    my $fh;
+
+    my $zipfile = mktemp("/tmp/adufile.XXXXXXXXXX").".zip";
+
+    system("$sacli ctrl slot=$ctrl diag file=$zipfile > /dev/null");
+
+    if(! -s $zipfile) {
+	die "$sacli diag failed";
+    }
+
+    open($fh, "unzip -p $zipfile ADUReport.txt |") || die "unzip $zipfile: failed: $!";
+    while(<$fh>) {
+	s/[\n\r]$//; # Nuke DOS line endings
+
+	    if(/^\S/) {
+		if(!/Monitor and Performance Statistics.*Factory/) {
+		    $currctrl="";
+		    $currhdd="";
+		    next;
+		}
+		if(/in\s(slot\s(\S+)|Embedded\sSlot).*\s([^: ][^: ]+:\S+)\s/) {
+		    my $ctrlpos = $1;
+		    $currctrl = $2;
+		    $currhdd = $3;
+		    if($ctrlpos eq "Embedded Slot") {
+			$currctrl = 0;
+		    }
+		    if($ctrl ne $currctrl) {
+			die "Unexpected ctrl $currctrl found while processing $ctrl";
+		    }
+		    next;
+		}
+		else {
+		    die "No ctrl/disk found on line '$_'\n";
+		}
+	    }
+	next unless($currhdd);
+
+	if(/\s+(.*?)\s\s+(.*)/) {
+	    my $n = $1;
+	    my $v = $2;
+	    if($v =~ /^0x[0-9a-fA-F]+$/) {
+		$v = hex($v);
+	    }
+	    $v =~ s/\s+$//;
+	    $h{$currhdd}{$n} = $v;
+	}
+    }
+    close($fh) || die "unzip $zipfile: failed: $!";
+    unlink($zipfile);
+
+    my %ehash;
+    foreach my $k (sort keys %h) {
+	if(!defined($h{$k}{'Product Revision'}) || !defined($h{$k}{'Read Errors Hard'}) || !defined($h{$k}{'Write Errors Hard'})) {
+	    printf "%-7s %-16s %s\n", "ctrl=$ctrl", $k, "No info (not a HP/Compaq HDD?)";
+	    next;
+	}
+	my $errs = 0;
+	if($h{$k}{'Read Errors Hard'} > $errs) {
+	    $errs = $h{$k}{'Read Errors Hard'};
+	}
+	if($h{$k}{'Write Errors Hard'} > $errs) {
+	    $errs = $h{$k}{'Write Errors Hard'};
+	}
+	if($errs > 0) {
+	    $ehash{$k} = $errs;
+	}
+    }
+
+    foreach my $k (sort {$ehash{$b}<=>$ehash{$a}} keys %ehash) {
+	my $mod = $h{$k}{'Product Revision'};
+	$mod =~ s/^ATA\s+//;
+	$mod =~ s/\s+/ /g;
+	printf "%-7s %-8s %-18s %-10s %-9s %s\n", "ctrl=$ctrl", $k, $mod, $h{$k}{'Serial Number'}, "read=$h{$k}{'Read Errors Hard'}", "write=$h{$k}{'Write Errors Hard'}";
+    }
+}
+
+
+
+my $fh;
+my %slots;
+
+# Find controllers slots
+# hpssacli support Pxxx onwards, hpacucli supports stuff until Px2x.
+foreach my $util (@utils) {
+    open($fh, "$util controller all show 2>/dev/null |");
+    while(<$fh>) {
+        chomp;
+
+        if(/Slot\s+(\d+[a-z]*)/) {
+            $slots{$1} = 1;
+        }
+    }
+    close($fh);
+    if(%slots) {
+        $sacli = $util;
+        last;
+    }
+}
+
+if(! %slots) {
+    die("No controllers found using any of " . join(" ", @utils));
+}
+
+
+foreach my $ctrl (sort keys %slots) {
+    show_hdd_harderr($ctrl);
+}

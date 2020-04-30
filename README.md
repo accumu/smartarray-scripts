@@ -72,3 +72,26 @@ and a large non-redundant LD for caching data:
 # should report these as predictive failures but better safe...
 12 5 * * * root hpsa-smartctl -H -l selftest -q errorsonly || echo "SmartArray drive with SMART errors detected."
 ```
+
+## cciss-showharderr
+
+Shows hard errors on HDDs connected to HPE/HP/Compaq SmartArray/CCISS
+controllers.
+
+This can sometimes be helpful when diagnosing weird issues with storage
+devices (read: firmware bugs or bad batches of drives).
+
+**NOTE** that no output means that no connected drive has any hard error.
+This makes this script handy to use when run on multiple hosts using mssh/dsh
+or similar to do a quick survey of hosts.
+
+
+### Usage example
+
+Just run the script, in the example below one drive has one
+hard read error.
+
+```
+root@host:~# cciss-showharderr 
+ctrl=0  5I:1:1   HP EF0300FATFD     ABCDEFGH   read=1    write=0
+```
