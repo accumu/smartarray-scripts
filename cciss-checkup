@@ -1,0 +1,294 @@
+#!/usr/bin/perl
+# vim:sw=4:ts=4:sts=4:et
+#
+# Script for checking for Linux Compaq/HP/HPE CCISS/SmartArray RAID problems.
+# Written by Niklas Edmundsson in August 2006.
+# Converted in April 2020 to dual use module/script to make it easier to use in
+# other tools (Icinga/Nagios check etc).
+
+# Copyright (C) 2006-2020 Niklas Edmundsson <nikke@acc.umu.se>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+package CcissCheckup;
+
+use warnings;
+use strict;
+
+use Carp;
+
+# (hp)ssacli support Pxxx onwards, hpacucli supports stuff until Px2x.
+my @utils=qw{ssacli hpssacli hpacucli};
+
+# ----------------------------------------------------------
+# Internal helpers
+
+# Run command, with error handling
+sub runcmd($)
+{
+    my $cmd=shift;
+
+    my @ret = `$cmd`;
+    if($? == -1) {
+        croak "$cmd: Failed to execute";
+    }
+    elsif ($? & 127) {
+        croak(sprintf "$cmd died with signal %d, %s coredump",
+               ($? & 127),  ($? & 128) ? 'with' : 'without');
+    }
+    else {
+        my $ret = $? >> 8;
+        if($ret != 0) {
+            croak("$cmd exited with value $ret");
+        }
+    }
+
+    chomp(@ret);
+    return @ret;
+}
+
+
+# Parse single-level output from the SmartArray utils
+sub saparse
+{
+    my @ary = @_;
+
+    my %h;
+
+    foreach (@ary) {
+        if(/\s*([^:]+):\s*(.*)\s*$/) {
+            my $item = $1;
+            my $value = $2;
+
+            $h{$item} = $value;
+        }
+    }
+
+    if(%h) {
+        return \%h;
+    }
+
+    return undef;
+}
+
+
+# Parse multi-level output from the SmartArray utils
+sub saparsemulti
+{
+    my ($id, @ary) = @_;
+
+    my %h;
+
+    my $currid;
+
+    foreach (@ary) {
+        if(/^\s*$/) {
+            $currid = undef;
+            next;
+        }
+        if(/^\s*$id\s+(.*$)/) {
+            $currid = $1;
+            next;
+        }
+        next unless $currid;
+
+
+        if(/\s*([^:]+):\s*(.*)\s*$/) {
+            my $item = $1;
+            my $value = $2;
+
+            $h{$currid}{$item} = $value;
+        }
+    }
+
+    if(%h) {
+        return \%h;
+    }
+
+    return undef;
+}
+
+my $sacli;
+
+# ----------------------------------------------------------
+# Public functions
+
+# List controller slots, returns hashref to hash with controller
+# slot-name pairs.
+sub list
+{
+    my %slots;
+    foreach my $util (@utils) {
+        my $fh;
+        open($fh, "$util controller all show 2>/dev/null |");
+        while(<$fh>) {
+            chomp;
+
+            if(/^(.*)Slot\s+(\d+[a-z]*)/) {
+                my $n = $1;
+                my $slot = $2;
+                $n =~ s/ in $//i;
+                $slots{$slot} = $n;
+            }
+        }
+        close($fh);
+        if(%slots) {
+            $sacli = $util;
+            last;
+        }
+    }
+
+    if(!%slots) {
+        croak "No SmartArray controllers found (tried " . join(", ", @utils) . ")";
+    }
+
+    return \%slots;
+}
+
+# Check controller state
+# Argument: controller slot ID.
+# Return: Arrayrefs of errors, warnings and info, respectively
+
+sub check
+{
+    my($slot) = @_;
+
+    my @errs;
+    my @warns;
+    my @infos;
+
+    my $status = saparse(runcmd("$sacli controller slot=$slot show status"));
+    foreach my $k (sort keys %{$status}) {
+        next unless($k =~ /Status/);
+
+        if(($status->{$k} ne 'OK') && 
+           !($k eq 'Cache Status' && $status->{$k} eq 'Not Configured'))
+        {
+            push @errs, "$k: $status->{$k}";
+        }
+    }
+
+    my $arys = saparsemulti("Array:", runcmd("$sacli controller slot=$slot array all show detail"));
+    foreach my $ary (sort keys %{$arys}) {
+        if($arys->{$ary}{Status} ne 'OK') {
+            push @errs, "Array $ary Status: $arys->{$ary}{Status}";
+        }
+
+        # Complain if there is more than single-digit MB unused, usually caused
+        # by setup/config mishaps.
+        if($arys->{$ary}{'Unused Space'} !~ /^\d\s+MB/) {
+            push @warns, "Array $ary Unused Space: $arys->{$ary}{'Unused Space'}";
+        }
+    }
+    push @infos, scalar(keys %{$arys}) . " arrays";
+
+    my $lds = saparsemulti("Logical Drive:", runcmd("$sacli controller slot=$slot ld all show detail"));
+    foreach my $ld (sort keys %{$lds}) {
+        my $ftol = $lds->{$ld}{'Fault Tolerance'};
+        $ftol =~ s/RAID\s*//;
+        my $ldstr = "LD $ld RAID $ftol ($lds->{$ld}{'Size'})";
+
+        if($lds->{$ld}{Status} eq 'OK') {
+            if($lds->{$ld}{'Parity Initialization Status'} && $lds->{$ld}{'Parity Initialization Status'} ne 'Initialization Completed') {
+                my $s = "$ldstr Parity Initialization Status: $lds->{$ld}{'Parity Initialization Status'}";
+                if($lds->{$ld}{'Parity Initialization Progress'}) {
+                    $s .= " ($lds->{$ld}{'Parity Initialization Progress'})";
+                }
+                push @warns, $s;
+            }
+        }
+        elsif($lds->{$ld}{Status} =~ /Recovering|Ready for Rebuild/) {
+            push @warns, "$ldstr Status: $lds->{$ld}{Status}";
+        }
+        else {
+            push @errs, "$ldstr Status: $lds->{$ld}{Status}";
+        }
+
+        if($lds->{$ld}{'Unrecoverable Media Errors'} && $lds->{$ld}{'Unrecoverable Media Errors'} ne 'None') {
+            push @warns, "$ldstr Unrecoverable Media Errors: $lds->{$ld}{'Unrecoverable Media Errors'}";
+        }
+    }
+    push @infos, scalar(scalar keys %{$lds}) . " LDs";
+
+    my $pds = saparsemulti("physicaldrive", runcmd("$sacli controller slot=$slot pd all show detail"));
+    foreach my $pd (sort keys %{$pds}) {
+        my $pdstr = "PD $pd ($pds->{$pd}{'Interface Type'} $pds->{$pd}{Size})";
+
+        if($pds->{$pd}{Status} eq 'Rebuilding') {
+            push @warns, "$pdstr Status: $pds->{$pd}{Status}";
+        }
+        elsif($pds->{$pd}{Status} ne 'OK') {
+            push @errs, "$pdstr Status: $pds->{$pd}{Status}";
+        }
+
+        if($pds->{$pd}{'SSD Smart Trip Wearout'} && $pds->{$pd}{'SSD Smart Trip Wearout'} !~ /^(False|Not Supported)$/) {
+            push @errs, "$pdstr SSD Smart Trip Wearout: $pds->{$pd}{'SSD Smart Trip Wearout'}";
+            foreach my $ik ('Usage remaining', 'Estimated Life Remaining based on workload to date') {
+                if($pds->{$pd}{$ik}) {
+                    push @errs, "$pdstr $ik: $pds->{$pd}{$ik}";
+                }
+            }
+        }
+
+        # Warn about unassigned drives, usually caused by setup/config mishaps
+        if($pds->{$pd}{'Drive Type'} =~ /Unassigned/) {
+            push @warns, "$pdstr $pds->{$pd}{'Drive Type'}";
+        }
+
+    }
+    push @infos, scalar(scalar keys %{$pds}) . " PDs";
+
+    return(\@errs, \@warns, \@infos);
+}
+
+
+# Called when not used as a module, then we act as a stand-alone script
+# for checking the state of HPE/HP/Compaq SmartArray/CCISS controllers.
+sub main
+{
+    my $ctrls = list();
+
+    foreach my $slot(sort keys %{$ctrls}) {
+        my ($e, $w, $i) = check($slot);
+        my $alert = "";
+        if($ENV{DEBUG}) {
+            $alert = "INFO";
+        }
+        if(@{$w}) {
+            $alert = "WARNING";
+        }
+        if(@{$e}) {
+            $alert = "CRITICAL";
+        }
+        if($alert) {
+            print "$alert: $ctrls->{$slot} slot=$slot\n";
+        }
+        if(@{$e}) {
+            print " ERRORS:\n  ", join("\n  ", @{$e}), "\n";
+        }
+        if(@{$w}) {
+            print " WARNINGS:\n  ", join("\n  ", @{$w}), "\n";
+        }
+        if($ENV{DEBUG} && @{$i}) {
+            print " INFOS:\n  ", join("\n  ", @{$i}), "\n";
+        }
+    }
+
+    exit 0;
+}
+
+# Call main if run as a standalone script
+main() if not caller();
+
+1;

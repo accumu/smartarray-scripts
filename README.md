@@ -7,6 +7,33 @@ the cciss or hpsa driver as long as the appropriate utility is present.
 The hpsa* family of scripts work only on controllers driven by the
 hpsa driver.
 
+These scripts require the appropriate Smart Array tool to be installed,
+commonly `ssacli`.
+
+## cciss-checkup
+
+Script for checking for Linux Compaq/HP/HPE CCISS/SmartArray RAID controllers
+for problems.
+
+Errors are emitted for items with non-OK status, ie broken drives, cache
+modules etc, and also SSDs that has reached wearout state, and more.
+
+Warnings are emitted when unrecoverable media errors are detected, rebuilds
+are in progress, attached drives are unused, there is free capacity in a
+RAID array, and more.
+
+If no errors or warnings are detected, the script gives no output making it
+ideal to use as a daily check in a cron job (no news is good news).
+
+Note that this script has dual personalities, as it also functions as a perl
+module to be easily used in other scripts, for example Icinga/Nagios checks.
+
+### Usage examples
+
+`cciss-checkup` - Checks all Smart Array controllers for issues
+
+`env DEBUG=1 cciss-checkup` - Same as above, but also prints informational messages about detected devices.
+
 ## hpsa-smartctl
 
 Helper-script to issue smartctl commands to all disks connected
